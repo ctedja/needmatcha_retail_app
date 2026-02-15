@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Need Matcha POS{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo-wrap">
+            <img
+              src="{{ url_for('asset_file', filename='needmatcha_logo-08_circle_white_green.png') }}"
+              alt="Need Matcha logo placeholder"
+            />
+          </div>
+          <div>
+            <p class="kicker">Retail POS</p>
+            <h1>Need Matcha</h1>
+          </div>
+        </div>
+        <nav class="nav">
+          <a href="{{ url_for('index') }}">POS</a>
+          <a href="{{ url_for('order_history') }}">Database</a>
+        </nav>
+      </header>
+      <main>{% block content %}{% endblock %}</main>
+    </div>
+  </body>
+</html>

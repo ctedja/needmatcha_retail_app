@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: needmatcha-retail-app
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      # Recommended: Supabase pooler URL.
+      - key: SUPABASE_DB_POOLER_URL
+        sync: false
+      # Optional direct DB URL fallback.
+      - key: SUPABASE_DB_URL
+        sync: false

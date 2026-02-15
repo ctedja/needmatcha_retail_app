@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Database Login{% endblock %}
+{% block content %}
+  <section class="menu-section">
+    <h2>Database Access</h2>
+    <p class="muted">Enter password to view and manage database records.</p>
+    <form class="record-card" method="post" action="{{ url_for('orders_login') }}">
+      <label for="db-password" class="muted">Password</label>
+      <input id="db-password" name="password" type="password" required />
+      {% if error %}
+        <p class="muted" style="color:#b43f3f;margin-top:0.6rem;">{{ error }}</p>
+      {% endif %}
+      <div class="record-actions">
+        <button class="btn-update" type="submit">Unlock Database</button>
+      </div>
+    </form>
+  </section>
+{% endblock %}

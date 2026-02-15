@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Need Matcha Database{% endblock %}
+{% block content %}
+  <section class="menu-section">
+    <h2>Database Records</h2>
+    <p class="muted">Edit item type or delete any record.</p>
+    <form method="post" action="{{ url_for('orders_logout') }}">
+      <button class="btn-delete" type="submit">Lock Database</button>
+    </form>
+    <div id="orders-list" class="orders-list">
+      <p class="muted">Loading records...</p>
+    </div>
+  </section>
+
+  <div id="status-banner" class="status-banner" aria-live="polite"></div>
+
+  <script>
+    window.MENU_ITEMS = {{ menu_items | tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='js/orders.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Need Matcha POS{% endblock %}
+{% block content %}
+  <section class="menu-section">
+    <h2>Menu</h2>
+    <p class="muted">Tap any item to add it to the order.</p>
+    <div id="menu-grid" class="menu-grid"></div>
+  </section>
+
+  <section class="selection-section">
+    <h2>Current Selection</h2>
+    <div id="selection-list" class="selection-list">
+      <p class="muted">No items selected yet.</p>
+    </div>
+  </section>
+
+  <section class="bottom-order-bar">
+    <div>
+      <p class="label">Total</p>
+      <p class="total" id="order-total">$0.00</p>
+      <p class="count" id="order-count">0 items</p>
+    </div>
+    <button id="submit-order" disabled>Submit Order</button>
+  </section>
+
+  <div id="status-banner" class="status-banner" aria-live="polite"></div>
+
+  <script>
+    window.MENU_ITEMS = {{ menu_items | tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+{% endblock %}
