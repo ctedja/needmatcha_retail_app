@@ -112,6 +112,10 @@ app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
 
 
+def is_api_request() -> bool:
+    return request.path.startswith("/api/")
+
+
 def get_db_connect_kwargs() -> dict[str, str]:
     kwargs: dict[str, str] = {}
 
@@ -154,6 +158,7 @@ def get_db() -> psycopg.Connection:
                 "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
             )
         conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, **get_db_connect_kwargs())
+        conn.prepare_threshold = None
         g.db = conn
     return g.db
 
@@ -163,6 +168,22 @@ def close_db(_: object) -> None:
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+
+@app.errorhandler(psycopg.Error)
+def handle_db_error(error: psycopg.Error):
+    app.logger.exception("Database error on %s", request.path, exc_info=error)
+    if is_api_request():
+        return jsonify({"error": "Database operation failed."}), 500
+    return "Database operation failed.", 500
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error: Exception):
+    app.logger.exception("Unhandled error on %s", request.path, exc_info=error)
+    if is_api_request():
+        return jsonify({"error": "Server error."}), 500
+    return "Server error.", 500
 
 
 def init_db() -> None:
