@@ -5,7 +5,6 @@ import secrets
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import psycopg
 from dotenv import load_dotenv
@@ -17,27 +16,11 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv()
 
 
-def normalize_database_url(raw_url: str) -> str:
-    parsed = urlparse(raw_url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.setdefault("sslmode", "require")
-    sslmode_override = os.getenv("DB_SSLMODE", "").strip()
-    if sslmode_override:
-        query["sslmode"] = sslmode_override
-    # Windows hosts can fail CA discovery in some environments; prefer OS trust store.
-    if os.name == "nt" and query.get("sslmode") in {"require", "verify-ca", "verify-full"}:
-        query.setdefault("sslrootcert", "system")
-    if query.get("sslrootcert") == "system" and query.get("sslmode") == "require":
-        query["sslmode"] = "verify-full"
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-
-RAW_DATABASE_URL = (
+DATABASE_URL = (
     os.getenv("SUPABASE_DB_POOLER_URL")
     or os.getenv("SUPABASE_DB_URL")
     or os.getenv("DATABASE_URL", "")
 )
-DATABASE_URL = normalize_database_url(RAW_DATABASE_URL) if RAW_DATABASE_URL else ""
 DB_ADMIN_PASSWORD = os.getenv("DB_ADMIN_PASSWORD", "")
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-insecure-key-change-me")
 
@@ -129,6 +112,27 @@ app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
 
 
+def get_db_connect_kwargs() -> dict[str, str]:
+    kwargs: dict[str, str] = {}
+
+    sslmode_override = os.getenv("DB_SSLMODE", "").strip()
+    if sslmode_override:
+        kwargs["sslmode"] = sslmode_override
+    elif "sslmode=" not in DATABASE_URL:
+        kwargs["sslmode"] = "require"
+
+    sslrootcert_override = os.getenv("DB_SSLROOTCERT", "").strip()
+    if sslrootcert_override:
+        kwargs["sslrootcert"] = sslrootcert_override
+    elif os.name == "nt" and kwargs.get("sslmode") in {"require", "verify-ca", "verify-full"}:
+        kwargs["sslrootcert"] = "system"
+
+    if kwargs.get("sslrootcert") == "system" and kwargs.get("sslmode") == "require":
+        kwargs["sslmode"] = "verify-full"
+
+    return kwargs
+
+
 def db_admin_authenticated() -> bool:
     return session.get("db_admin_authed") is True
 
@@ -149,7 +153,7 @@ def get_db() -> psycopg.Connection:
             raise RuntimeError(
                 "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
             )
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, **get_db_connect_kwargs())
         g.db = conn
     return g.db
 
