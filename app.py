@@ -107,7 +107,7 @@ MENU_ITEMS = [
     {
         "key": "cookie",
         "name": "Cookie",
-        "price_cents": 8000,
+        "price_cents": 800,
         "image": "cookie.jpg",
     },
     {
