@@ -104,6 +104,24 @@ MENU_ITEMS = [
         "price_cents": 3900,
         "image": "sachet.png",
     },
+    {
+        "key": "cookie",
+        "name": "Cookie",
+        "price_cents": 8000,
+        "image": "cookie.jpg",
+    },
+    {
+        "key": "freecookie",
+        "name": "FREE Cookie",
+        "price_cents": 0,
+        "image": "cookie.jpg",
+    },
+    {
+        "key": "freebasic",
+        "name": "FREE Basic",
+        "price_cents": 0,
+        "image": "product_basicbae.png",
+    },
 ]
 
 MENU_LOOKUP = {item["key"]: item for item in MENU_ITEMS}
