@@ -160,9 +160,6 @@ def get_db_connect_kwargs() -> dict[str, str | int]:
     elif os.name == "nt" and kwargs.get("sslmode") in {"require", "verify-ca", "verify-full"}:
         kwargs["sslrootcert"] = "system"
 
-    if kwargs.get("sslrootcert") == "system" and kwargs.get("sslmode") == "require":
-        kwargs["sslmode"] = "verify-full"
-
     return kwargs
 
 
@@ -191,8 +188,14 @@ def get_db() -> psycopg.Connection:
         conn = db_pool.getconn()
         conn.row_factory = dict_row
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = %s", (DB_STATEMENT_TIMEOUT_MS,))
-            cur.execute("SET idle_in_transaction_session_timeout = %s", (DB_IDLE_TX_TIMEOUT_MS,))
+            cur.execute(
+                "SELECT set_config('statement_timeout', %s, false)",
+                (f"{DB_STATEMENT_TIMEOUT_MS}ms",),
+            )
+            cur.execute(
+                "SELECT set_config('idle_in_transaction_session_timeout', %s, false)",
+                (f"{DB_IDLE_TX_TIMEOUT_MS}ms",),
+            )
         conn.prepare_threshold = None
         g.db = conn
     return g.db
