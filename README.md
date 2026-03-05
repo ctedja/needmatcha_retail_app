@@ -26,7 +26,7 @@ Open `http://localhost:5000`.
 3. In Render service environment variables, set `SUPABASE_DB_POOLER_URL` (recommended) or `SUPABASE_DB_URL`.
 3. Render will use `render.yaml` and run:
    - Build: `pip install -r requirements.txt`
-   - Start: `gunicorn app:app`
+   - Start: `gunicorn app:app --workers=2 --threads=4 --worker-class=gthread --timeout=30 --graceful-timeout=30 --keep-alive=5`
 
 ## Notes
 
@@ -34,3 +34,10 @@ Open `http://localhost:5000`.
 - `sslmode=require` is auto-applied if not present in the URL.
 - If local Windows TLS inspection blocks cert validation, set `DB_SSLMODE=disable` locally only.
 - Table `order_items` is auto-created at startup if missing.
+- Writes use a server-side idempotency key (`Idempotency-Key`) to avoid duplicate orders on retries/timeouts.
+- Optional reliability env vars:
+  - `DB_CONNECT_TIMEOUT_SECONDS` (default `10`)
+  - `DB_STATEMENT_TIMEOUT_MS` (default `12000`)
+  - `DB_IDLE_IN_TX_TIMEOUT_MS` (default `15000`)
+  - `DB_POOL_MIN_SIZE` (default `1`)
+  - `DB_POOL_MAX_SIZE` (default `10`)

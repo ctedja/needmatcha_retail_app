@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import secrets
+import threading
+import uuid
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -9,6 +11,7 @@ from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
 from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 
 
@@ -23,6 +26,11 @@ DATABASE_URL = (
 )
 DB_ADMIN_PASSWORD = os.getenv("DB_ADMIN_PASSWORD", "")
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-insecure-key-change-me")
+DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "10"))
+DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "12000"))
+DB_IDLE_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "15000"))
+DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
 
 
 MENU_ITEMS = [
@@ -128,14 +136,17 @@ MENU_LOOKUP = {item["key"]: item for item in MENU_ITEMS}
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
+db_pool: ConnectionPool | None = None
+schema_initialized = False
+schema_lock = threading.Lock()
 
 
 def is_api_request() -> bool:
     return request.path.startswith("/api/")
 
 
-def get_db_connect_kwargs() -> dict[str, str]:
-    kwargs: dict[str, str] = {}
+def get_db_connect_kwargs() -> dict[str, str | int]:
+    kwargs: dict[str, str | int] = {"connect_timeout": DB_CONNECT_TIMEOUT}
 
     sslmode_override = os.getenv("DB_SSLMODE", "").strip()
     if sslmode_override:
@@ -175,7 +186,13 @@ def get_db() -> psycopg.Connection:
             raise RuntimeError(
                 "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
             )
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, **get_db_connect_kwargs())
+        if db_pool is None:
+            raise RuntimeError("Database pool is not initialized.")
+        conn = db_pool.getconn()
+        conn.row_factory = dict_row
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = %s", (DB_STATEMENT_TIMEOUT_MS,))
+            cur.execute("SET idle_in_transaction_session_timeout = %s", (DB_IDLE_TX_TIMEOUT_MS,))
         conn.prepare_threshold = None
         g.db = conn
     return g.db
@@ -185,7 +202,10 @@ def get_db() -> psycopg.Connection:
 def close_db(_: object) -> None:
     db = g.pop("db", None)
     if db is not None:
-        db.close()
+        if db_pool is not None:
+            db_pool.putconn(db)
+        else:
+            db.close()
 
 
 @app.errorhandler(psycopg.Error)
@@ -214,17 +234,34 @@ def init_db() -> None:
                 item_key TEXT NOT NULL,
                 item_name TEXT NOT NULL,
                 price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
-                ordered_at TIMESTAMPTZ NOT NULL
+                ordered_at TIMESTAMPTZ NOT NULL,
+                idempotency_key UUID
             )
             """
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_order_items_ordered_at ON order_items(ordered_at DESC)"
         )
+        cur.execute("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS idempotency_key UUID")
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_items_idempotency_key ON order_items(idempotency_key)"
+            " WHERE idempotency_key IS NOT NULL"
+        )
 
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_schema_initialized() -> None:
+    global schema_initialized
+    if schema_initialized:
+        return
+    with schema_lock:
+        if schema_initialized:
+            return
+        init_db()
+        schema_initialized = True
 
 
 @app.route("/")
@@ -269,6 +306,7 @@ def asset_file(filename: str):
 @app.get("/api/orders")
 @require_db_admin_api
 def get_orders():
+    ensure_schema_initialized()
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute(
@@ -288,10 +326,19 @@ def get_orders():
 
 @app.post("/api/orders")
 def create_order():
+    ensure_schema_initialized()
     payload = request.get_json(silent=True) or {}
     item_keys = payload.get("items", [])
     if not isinstance(item_keys, list) or not item_keys:
         return jsonify({"error": "Provide at least one item key."}), 400
+
+    idem_header = (request.headers.get("Idempotency-Key") or "").strip()
+    idempotency_key: uuid.UUID | None = None
+    if idem_header:
+        try:
+            idempotency_key = uuid.UUID(idem_header)
+        except ValueError:
+            return jsonify({"error": "Invalid Idempotency-Key header."}), 400
 
     timestamp = now_utc_iso()
     to_insert: list[tuple[str, str, int, str]] = []
@@ -303,13 +350,59 @@ def create_order():
 
     conn = get_db()
     with conn, conn.cursor() as cur:
-        cur.executemany(
-            """
-            INSERT INTO order_items (item_key, item_name, price_cents, ordered_at)
-            VALUES (%s, %s, %s, %s)
-            """,
-            to_insert,
-        )
+        if idempotency_key is None:
+            cur.executemany(
+                """
+                INSERT INTO order_items (item_key, item_name, price_cents, ordered_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                to_insert,
+            )
+        else:
+            first_item = MENU_LOOKUP[item_keys[0]]
+            cur.execute(
+                """
+                INSERT INTO order_items (item_key, item_name, price_cents, ordered_at, idempotency_key)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+                RETURNING id
+                """,
+                (
+                    first_item["key"],
+                    first_item["name"],
+                    first_item["price_cents"],
+                    timestamp,
+                    idempotency_key,
+                ),
+            )
+            inserted = cur.fetchone()
+            if inserted is None:
+                cur.execute(
+                    "SELECT ordered_at FROM order_items WHERE idempotency_key = %s LIMIT 1",
+                    (idempotency_key,),
+                )
+                existing = cur.fetchone()
+                return jsonify(
+                    {
+                        "success": True,
+                        "idempotent_replay": True,
+                        "item_count": len(item_keys),
+                        "ordered_at": existing["ordered_at"].isoformat() if existing else None,
+                    }
+                )
+
+            if len(item_keys) > 1:
+                tail_rows = []
+                for item_key in item_keys[1:]:
+                    item = MENU_LOOKUP[item_key]
+                    tail_rows.append((item["key"], item["name"], item["price_cents"], timestamp))
+                cur.executemany(
+                    """
+                    INSERT INTO order_items (item_key, item_name, price_cents, ordered_at)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    tail_rows,
+                )
 
     return jsonify({"success": True, "item_count": len(to_insert), "ordered_at": timestamp})
 
@@ -317,6 +410,7 @@ def create_order():
 @app.put("/api/orders/<int:order_id>")
 @require_db_admin_api
 def update_order(order_id: int):
+    ensure_schema_initialized()
     payload = request.get_json(silent=True) or {}
     item_key = payload.get("item_key")
     if not isinstance(item_key, str):
@@ -346,6 +440,7 @@ def update_order(order_id: int):
 @app.delete("/api/orders/<int:order_id>")
 @require_db_admin_api
 def delete_order(order_id: int):
+    ensure_schema_initialized()
     conn = get_db()
     with conn, conn.cursor() as cur:
         cur.execute("DELETE FROM order_items WHERE id = %s", (order_id,))
@@ -356,8 +451,25 @@ def delete_order(order_id: int):
     return jsonify({"success": True})
 
 
+if not DATABASE_URL:
+    raise RuntimeError(
+        "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
+    )
+
+db_pool = ConnectionPool(
+    conninfo=DATABASE_URL,
+    kwargs=get_db_connect_kwargs(),
+    min_size=DB_POOL_MIN_SIZE,
+    max_size=DB_POOL_MAX_SIZE,
+    open=True,
+)
+
 with app.app_context():
-    init_db()
+    try:
+        init_db()
+        schema_initialized = True
+    except psycopg.Error:
+        app.logger.exception("Database initialization failed during startup; will retry on requests.")
 
 
 if __name__ == "__main__":

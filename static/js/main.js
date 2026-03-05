@@ -9,6 +9,32 @@ const totalEl = document.getElementById("order-total");
 const countEl = document.getElementById("order-count");
 const submitBtn = document.getElementById("submit-order");
 const statusBanner = document.getElementById("status-banner");
+const SUBMIT_TIMEOUT_MS = 15000;
+let pendingRequestId = null;
+let pendingFingerprint = null;
+
+function createRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function cartFingerprint() {
+  return selectedKeys.join("|");
+}
 
 function centsToDollars(cents) {
   return `$${(cents / 100).toFixed(2)}`;
@@ -127,13 +153,23 @@ function removeOneItem(itemKey) {
 
 async function submitOrder() {
   submitBtn.disabled = true;
+  const fingerprint = cartFingerprint();
+  if (!pendingRequestId || pendingFingerprint !== fingerprint) {
+    pendingRequestId = createRequestId();
+    pendingFingerprint = fingerprint;
+  }
+  const requestId = pendingRequestId;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SUBMIT_TIMEOUT_MS);
   try {
     const response = await fetch("/api/orders", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Idempotency-Key": requestId,
       },
       body: JSON.stringify({ items: selectedKeys }),
+      signal: controller.signal,
     });
 
     const contentType = response.headers.get("content-type") || "";
@@ -149,10 +185,17 @@ async function submitOrder() {
       delete quantities[key];
     });
     updateUi();
-    showStatus("Order saved to database.");
+    pendingRequestId = null;
+    pendingFingerprint = null;
+    showStatus(payload.idempotent_replay ? "Order already saved." : "Order saved to database.");
   } catch (error) {
-    showStatus(error.message);
+    const message =
+      error.name === "AbortError"
+        ? "Submit timed out. Check orders page before retrying."
+        : error.message;
+    showStatus(message);
   } finally {
+    clearTimeout(timeoutId);
     submitBtn.disabled = Object.keys(quantities).length === 0;
   }
 }
