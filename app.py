@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
+from werkzeug.exceptions import HTTPException
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -31,6 +32,7 @@ DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "12000"))
 DB_IDLE_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "15000"))
 DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
 DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
+DB_POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "5"))
 
 
 MENU_ITEMS = [
@@ -147,6 +149,10 @@ def is_api_request() -> bool:
 
 def get_db_connect_kwargs() -> dict[str, str | int]:
     kwargs: dict[str, str | int] = {"connect_timeout": DB_CONNECT_TIMEOUT}
+    kwargs["options"] = (
+        f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS} "
+        f"-c idle_in_transaction_session_timeout={DB_IDLE_TX_TIMEOUT_MS}"
+    )
 
     sslmode_override = os.getenv("DB_SSLMODE", "").strip()
     if sslmode_override:
@@ -185,17 +191,8 @@ def get_db() -> psycopg.Connection:
             )
         if db_pool is None:
             raise RuntimeError("Database pool is not initialized.")
-        conn = db_pool.getconn()
+        conn = db_pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
         conn.row_factory = dict_row
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT set_config('statement_timeout', %s, false)",
-                (f"{DB_STATEMENT_TIMEOUT_MS}ms",),
-            )
-            cur.execute(
-                "SELECT set_config('idle_in_transaction_session_timeout', %s, false)",
-                (f"{DB_IDLE_TX_TIMEOUT_MS}ms",),
-            )
         conn.prepare_threshold = None
         g.db = conn
     return g.db
@@ -221,6 +218,8 @@ def handle_db_error(error: psycopg.Error):
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(error: Exception):
+    if isinstance(error, HTTPException):
+        return error
     app.logger.exception("Unhandled error on %s", request.path, exc_info=error)
     if is_api_request():
         return jsonify({"error": "Server error."}), 500
