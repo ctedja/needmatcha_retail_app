@@ -9,7 +9,7 @@ const totalEl = document.getElementById("order-total");
 const countEl = document.getElementById("order-count");
 const submitBtn = document.getElementById("submit-order");
 const statusBanner = document.getElementById("status-banner");
-const SUBMIT_TIMEOUT_MS = 15000;
+const SUBMIT_TIMEOUT_MS = 45000;
 let pendingRequestId = null;
 let pendingFingerprint = null;
 
