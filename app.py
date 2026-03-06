@@ -13,7 +13,7 @@ from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
 from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
-from psycopg_pool import ConnectionPool, PoolTimeout
+from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 from psycopg.rows import dict_row
 from werkzeug.exceptions import HTTPException
 
@@ -146,6 +146,7 @@ app.secret_key = FLASK_SECRET_KEY
 db_pool: ConnectionPool | None = None
 schema_initialized = False
 schema_lock = threading.Lock()
+pool_lock = threading.Lock()
 schema_init_last_attempt_monotonic = 0.0
 
 
@@ -154,6 +155,15 @@ def close_db_pool() -> None:
     if db_pool is not None:
         db_pool.close()
         db_pool = None
+
+
+def ensure_pool_open() -> None:
+    if db_pool is None:
+        raise RuntimeError("Database pool is not initialized.")
+    if db_pool.closed:
+        with pool_lock:
+            if db_pool.closed:
+                db_pool.open(wait=True, timeout=DB_POOL_ACQUIRE_TIMEOUT)
 
 
 def reset_request_db_conn(close: bool = False) -> None:
@@ -232,9 +242,12 @@ def get_db() -> psycopg.Connection:
             raise RuntimeError(
                 "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
             )
-        if db_pool is None:
-            raise RuntimeError("Database pool is not initialized.")
-        conn = db_pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
+        ensure_pool_open()
+        try:
+            conn = db_pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
+        except PoolClosed:
+            ensure_pool_open()
+            conn = db_pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
         conn.row_factory = dict_row
         conn.prepare_threshold = None
         g.db = conn
