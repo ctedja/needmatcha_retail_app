@@ -32,12 +32,12 @@ FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-insecure-key-change-me")
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "10"))
 DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "12000"))
 DB_IDLE_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "15000"))
-DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
-DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
-DB_POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "3"))
-DB_WRITE_RETRIES = int(os.getenv("DB_WRITE_RETRIES", "2"))
+DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "0"))
+DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "4"))
+DB_POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "2"))
+DB_WRITE_RETRIES = int(os.getenv("DB_WRITE_RETRIES", "1"))
 DB_WRITE_RETRY_DELAY_MS = int(os.getenv("DB_WRITE_RETRY_DELAY_MS", "250"))
-SCHEMA_INIT_RETRY_INTERVAL_SECONDS = int(os.getenv("SCHEMA_INIT_RETRY_INTERVAL_SECONDS", "60"))
+SCHEMA_INIT_RETRY_INTERVAL_SECONDS = int(os.getenv("SCHEMA_INIT_RETRY_INTERVAL_SECONDS", "300"))
 
 
 MENU_ITEMS = [
@@ -541,7 +541,7 @@ db_pool = ConnectionPool(
     min_size=DB_POOL_MIN_SIZE,
     max_size=DB_POOL_MAX_SIZE,
     check=ConnectionPool.check_connection,
-    open=True,
+    open=False,
 )
 atexit.register(close_db_pool)
 

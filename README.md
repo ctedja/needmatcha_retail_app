@@ -26,7 +26,7 @@ Open `http://localhost:5000`.
 3. In Render service environment variables, set `SUPABASE_DB_POOLER_URL` (recommended) or `SUPABASE_DB_URL`.
 3. Render will use `render.yaml` and run:
    - Build: `pip install -r requirements.txt`
-   - Start: `gunicorn app:app --workers=2 --threads=4 --worker-class=gthread --timeout=30 --graceful-timeout=30 --keep-alive=5`
+   - Start: `gunicorn app:app --workers=1 --threads=2 --worker-class=gthread --timeout=45 --graceful-timeout=45 --keep-alive=5`
 
 ## Notes
 
@@ -39,8 +39,9 @@ Open `http://localhost:5000`.
   - `DB_CONNECT_TIMEOUT_SECONDS` (default `10`)
   - `DB_STATEMENT_TIMEOUT_MS` (default `12000`)
   - `DB_IDLE_IN_TX_TIMEOUT_MS` (default `15000`)
-  - `DB_POOL_MIN_SIZE` (default `1`)
-  - `DB_POOL_MAX_SIZE` (default `10`)
-  - `DB_POOL_ACQUIRE_TIMEOUT_SECONDS` (default `5`)
-  - `DB_WRITE_RETRIES` (default `2`)
+  - `DB_POOL_MIN_SIZE` (default `0`)
+  - `DB_POOL_MAX_SIZE` (default `4`)
+  - `DB_POOL_ACQUIRE_TIMEOUT_SECONDS` (default `2`)
+  - `DB_WRITE_RETRIES` (default `1`)
   - `DB_WRITE_RETRY_DELAY_MS` (default `250`)
+  - `SCHEMA_INIT_RETRY_INTERVAL_SECONDS` (default `300`)
