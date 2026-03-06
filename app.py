@@ -37,6 +37,7 @@ DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
 DB_POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "5"))
 DB_WRITE_RETRIES = int(os.getenv("DB_WRITE_RETRIES", "2"))
 DB_WRITE_RETRY_DELAY_MS = int(os.getenv("DB_WRITE_RETRY_DELAY_MS", "250"))
+SCHEMA_INIT_RETRY_INTERVAL_SECONDS = int(os.getenv("SCHEMA_INIT_RETRY_INTERVAL_SECONDS", "60"))
 
 
 MENU_ITEMS = [
@@ -145,6 +146,7 @@ app.secret_key = FLASK_SECRET_KEY
 db_pool: ConnectionPool | None = None
 schema_initialized = False
 schema_lock = threading.Lock()
+schema_init_last_attempt_monotonic = 0.0
 
 
 def close_db_pool() -> None:
@@ -293,13 +295,27 @@ def now_utc_iso() -> str:
 
 def ensure_schema_initialized() -> None:
     global schema_initialized
+    global schema_init_last_attempt_monotonic
     if schema_initialized:
+        return
+    now_monotonic = time.monotonic()
+    if now_monotonic - schema_init_last_attempt_monotonic < SCHEMA_INIT_RETRY_INTERVAL_SECONDS:
         return
     with schema_lock:
         if schema_initialized:
             return
-        init_db()
-        schema_initialized = True
+        now_monotonic = time.monotonic()
+        if now_monotonic - schema_init_last_attempt_monotonic < SCHEMA_INIT_RETRY_INTERVAL_SECONDS:
+            return
+        schema_init_last_attempt_monotonic = now_monotonic
+        try:
+            init_db()
+            schema_initialized = True
+        except psycopg.Error:
+            app.logger.warning(
+                "Schema initialization attempt failed; will retry in %s seconds.",
+                SCHEMA_INIT_RETRY_INTERVAL_SECONDS,
+            )
 
 
 @app.route("/")
