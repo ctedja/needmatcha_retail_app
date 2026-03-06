@@ -34,7 +34,7 @@ DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "12000"))
 DB_IDLE_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "15000"))
 DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
 DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
-DB_POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "5"))
+DB_POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "3"))
 DB_WRITE_RETRIES = int(os.getenv("DB_WRITE_RETRIES", "2"))
 DB_WRITE_RETRY_DELAY_MS = int(os.getenv("DB_WRITE_RETRY_DELAY_MS", "250"))
 SCHEMA_INIT_RETRY_INTERVAL_SECONDS = int(os.getenv("SCHEMA_INIT_RETRY_INTERVAL_SECONDS", "60"))
@@ -168,7 +168,7 @@ def reset_request_db_conn(close: bool = False) -> None:
 
 def is_transient_db_error(error: Exception) -> bool:
     if isinstance(error, PoolTimeout):
-        return True
+        return False
     if isinstance(error, psycopg.OperationalError):
         message = str(error).lower()
         transient_signals = (
@@ -252,6 +252,14 @@ def handle_db_error(error: psycopg.Error):
     if is_api_request():
         return jsonify({"error": "Database operation failed."}), 500
     return "Database operation failed.", 500
+
+
+@app.errorhandler(PoolTimeout)
+def handle_pool_timeout(error: PoolTimeout):
+    app.logger.warning("DB pool timeout on %s: %s", request.path, error)
+    if is_api_request():
+        return jsonify({"error": "Database temporarily unavailable. Please retry."}), 503
+    return "Database temporarily unavailable. Please retry.", 503
 
 
 @app.errorhandler(Exception)
@@ -463,6 +471,8 @@ def create_order():
             return jsonify({"success": True, "item_count": len(to_insert), "ordered_at": timestamp})
         except (psycopg.OperationalError, PoolTimeout) as error:
             reset_request_db_conn(close=True)
+            if isinstance(error, PoolTimeout):
+                raise
             if attempt >= attempts or not is_transient_db_error(error):
                 raise
             app.logger.warning(
