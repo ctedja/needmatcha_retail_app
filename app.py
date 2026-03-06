@@ -4,6 +4,8 @@ import os
 import secrets
 import threading
 import uuid
+import atexit
+import time
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -11,7 +13,7 @@ from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
 from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 from psycopg.rows import dict_row
 from werkzeug.exceptions import HTTPException
 
@@ -33,6 +35,8 @@ DB_IDLE_TX_TIMEOUT_MS = int(os.getenv("DB_IDLE_IN_TX_TIMEOUT_MS", "15000"))
 DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
 DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "10"))
 DB_POOL_ACQUIRE_TIMEOUT = float(os.getenv("DB_POOL_ACQUIRE_TIMEOUT_SECONDS", "5"))
+DB_WRITE_RETRIES = int(os.getenv("DB_WRITE_RETRIES", "2"))
+DB_WRITE_RETRY_DELAY_MS = int(os.getenv("DB_WRITE_RETRY_DELAY_MS", "250"))
 
 
 MENU_ITEMS = [
@@ -143,6 +147,43 @@ schema_initialized = False
 schema_lock = threading.Lock()
 
 
+def close_db_pool() -> None:
+    global db_pool
+    if db_pool is not None:
+        db_pool.close()
+        db_pool = None
+
+
+def reset_request_db_conn(close: bool = False) -> None:
+    db = g.pop("db", None)
+    if db is None:
+        return
+    if db_pool is not None:
+        db_pool.putconn(db, close=close)
+    else:
+        db.close()
+
+
+def is_transient_db_error(error: Exception) -> bool:
+    if isinstance(error, PoolTimeout):
+        return True
+    if isinstance(error, psycopg.OperationalError):
+        message = str(error).lower()
+        transient_signals = (
+            "bad record mac",
+            "decryption failed",
+            "connection reset",
+            "connection refused",
+            "server closed the connection",
+            "terminating connection",
+            "timeout",
+            "couldn't get a connection",
+            "network",
+        )
+        return any(signal in message for signal in transient_signals)
+    return False
+
+
 def is_api_request() -> bool:
     return request.path.startswith("/api/")
 
@@ -200,12 +241,7 @@ def get_db() -> psycopg.Connection:
 
 @app.teardown_appcontext
 def close_db(_: object) -> None:
-    db = g.pop("db", None)
-    if db is not None:
-        if db_pool is not None:
-            db_pool.putconn(db)
-        else:
-            db.close()
+    reset_request_db_conn(close=False)
 
 
 @app.errorhandler(psycopg.Error)
@@ -350,63 +386,78 @@ def create_order():
             return jsonify({"error": f"Unknown item key: {item_key}"}), 400
         to_insert.append((item["key"], item["name"], item["price_cents"], timestamp))
 
-    conn = get_db()
-    with conn, conn.cursor() as cur:
-        if idempotency_key is None:
-            cur.executemany(
-                """
-                INSERT INTO order_items (item_key, item_name, price_cents, ordered_at)
-                VALUES (%s, %s, %s, %s)
-                """,
-                to_insert,
-            )
-        else:
-            first_item = MENU_LOOKUP[item_keys[0]]
-            cur.execute(
-                """
-                INSERT INTO order_items (item_key, item_name, price_cents, ordered_at, idempotency_key)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
-                RETURNING id
-                """,
-                (
-                    first_item["key"],
-                    first_item["name"],
-                    first_item["price_cents"],
-                    timestamp,
-                    idempotency_key,
-                ),
-            )
-            inserted = cur.fetchone()
-            if inserted is None:
-                cur.execute(
-                    "SELECT ordered_at FROM order_items WHERE idempotency_key = %s LIMIT 1",
-                    (idempotency_key,),
-                )
-                existing = cur.fetchone()
-                return jsonify(
-                    {
-                        "success": True,
-                        "idempotent_replay": True,
-                        "item_count": len(item_keys),
-                        "ordered_at": existing["ordered_at"].isoformat() if existing else None,
-                    }
-                )
+    attempts = DB_WRITE_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            conn = get_db()
+            with conn, conn.cursor() as cur:
+                if idempotency_key is None:
+                    cur.executemany(
+                        """
+                        INSERT INTO order_items (item_key, item_name, price_cents, ordered_at)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        to_insert,
+                    )
+                else:
+                    first_item = MENU_LOOKUP[item_keys[0]]
+                    cur.execute(
+                        """
+                        INSERT INTO order_items (item_key, item_name, price_cents, ordered_at, idempotency_key)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+                        RETURNING id
+                        """,
+                        (
+                            first_item["key"],
+                            first_item["name"],
+                            first_item["price_cents"],
+                            timestamp,
+                            idempotency_key,
+                        ),
+                    )
+                    inserted = cur.fetchone()
+                    if inserted is None:
+                        cur.execute(
+                            "SELECT ordered_at FROM order_items WHERE idempotency_key = %s LIMIT 1",
+                            (idempotency_key,),
+                        )
+                        existing = cur.fetchone()
+                        return jsonify(
+                            {
+                                "success": True,
+                                "idempotent_replay": True,
+                                "item_count": len(item_keys),
+                                "ordered_at": existing["ordered_at"].isoformat() if existing else None,
+                            }
+                        )
 
-            if len(item_keys) > 1:
-                tail_rows = []
-                for item_key in item_keys[1:]:
-                    item = MENU_LOOKUP[item_key]
-                    tail_rows.append((item["key"], item["name"], item["price_cents"], timestamp))
-                cur.executemany(
-                    """
-                    INSERT INTO order_items (item_key, item_name, price_cents, ordered_at)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    tail_rows,
-                )
+                    if len(item_keys) > 1:
+                        tail_rows = []
+                        for item_key in item_keys[1:]:
+                            item = MENU_LOOKUP[item_key]
+                            tail_rows.append((item["key"], item["name"], item["price_cents"], timestamp))
+                        cur.executemany(
+                            """
+                            INSERT INTO order_items (item_key, item_name, price_cents, ordered_at)
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            tail_rows,
+                        )
+            return jsonify({"success": True, "item_count": len(to_insert), "ordered_at": timestamp})
+        except (psycopg.OperationalError, PoolTimeout) as error:
+            reset_request_db_conn(close=True)
+            if attempt >= attempts or not is_transient_db_error(error):
+                raise
+            app.logger.warning(
+                "Transient DB error on /api/orders; retrying (%s/%s): %s",
+                attempt,
+                attempts,
+                str(error),
+            )
+            time.sleep(DB_WRITE_RETRY_DELAY_MS / 1000.0)
 
-    return jsonify({"success": True, "item_count": len(to_insert), "ordered_at": timestamp})
+    return jsonify({"error": "Database operation failed."}), 500
 
 
 @app.put("/api/orders/<int:order_id>")
@@ -463,8 +514,10 @@ db_pool = ConnectionPool(
     kwargs=get_db_connect_kwargs(),
     min_size=DB_POOL_MIN_SIZE,
     max_size=DB_POOL_MAX_SIZE,
+    check=ConnectionPool.check_connection,
     open=True,
 )
+atexit.register(close_db_pool)
 
 with app.app_context():
     try:

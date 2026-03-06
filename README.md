@@ -41,3 +41,6 @@ Open `http://localhost:5000`.
   - `DB_IDLE_IN_TX_TIMEOUT_MS` (default `15000`)
   - `DB_POOL_MIN_SIZE` (default `1`)
   - `DB_POOL_MAX_SIZE` (default `10`)
+  - `DB_POOL_ACQUIRE_TIMEOUT_SECONDS` (default `5`)
+  - `DB_WRITE_RETRIES` (default `2`)
+  - `DB_WRITE_RETRY_DELAY_MS` (default `250`)
