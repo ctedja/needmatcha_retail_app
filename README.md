@@ -19,6 +19,25 @@ python app.py
 
 Open `http://localhost:5000`.
 
+## Deploy on Vercel + Supabase
+
+This repo is configured to run on Vercel's Python runtime with Supabase Postgres.
+
+1. Push this repo to GitHub.
+2. In Supabase, create a project.
+3. In Supabase, open `Project Settings` -> `Database` and copy the `Transaction pooler` connection string.
+4. In Vercel, import this GitHub repo as a new project.
+5. In Vercel `Settings` -> `Environment Variables`, add:
+   - `SUPABASE_DB_POOLER_URL`
+   - `DB_ADMIN_PASSWORD`
+   - `FLASK_SECRET_KEY`
+6. Redeploy.
+
+Notes:
+- `SUPABASE_DB_POOLER_URL` is the preferred setting for Vercel because it works better with serverless connection patterns.
+- Static files are served from `public/`.
+- Vercel routes all dynamic requests through `api/index.py`.
+
 ## Deploy on Render with GitHub
 
 1. Push this repo to GitHub.
@@ -33,7 +52,8 @@ Open `http://localhost:5000`.
 - App reads DB URL in this order: `SUPABASE_DB_POOLER_URL`, `SUPABASE_DB_URL`, then `DATABASE_URL`.
 - `sslmode=require` is auto-applied if not present in the URL.
 - If local Windows TLS inspection blocks cert validation, set `DB_SSLMODE=disable` locally only.
-- Table `order_items` is auto-created at startup if missing.
+- Table `order_items` is auto-created on first successful database access if missing.
+- On Vercel, schema creation happens lazily on request instead of at import time.
 - Writes use a server-side idempotency key (`Idempotency-Key`) to avoid duplicate orders on retries/timeouts.
 - Optional reliability env vars:
   - `DB_CONNECT_TIMEOUT_SECONDS` (default `10`)

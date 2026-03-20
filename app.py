@@ -19,14 +19,10 @@ from werkzeug.exceptions import HTTPException
 
 
 BASE_DIR = Path(__file__).resolve().parent
+PUBLIC_DIR = BASE_DIR / "public"
 load_dotenv()
 
 
-DATABASE_URL = (
-    os.getenv("SUPABASE_DB_POOLER_URL")
-    or os.getenv("SUPABASE_DB_URL")
-    or os.getenv("DATABASE_URL", "")
-)
 DB_ADMIN_PASSWORD = os.getenv("DB_ADMIN_PASSWORD", "")
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-insecure-key-change-me")
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "10"))
@@ -141,39 +137,79 @@ MENU_ITEMS = [
 
 MENU_LOOKUP = {item["key"]: item for item in MENU_ITEMS}
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=str(PUBLIC_DIR / "static"), static_url_path="/static")
 app.secret_key = FLASK_SECRET_KEY
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = (
+    os.getenv("SESSION_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes"}
+    or bool(os.getenv("VERCEL"))
+)
 db_pool: ConnectionPool | None = None
 schema_initialized = False
 schema_lock = threading.Lock()
 pool_lock = threading.Lock()
 schema_init_last_attempt_monotonic = 0.0
+SCHEMA_LOCK_KEY = 82461031
 
 
 def close_db_pool() -> None:
     global db_pool
-    if db_pool is not None:
-        db_pool.close()
-        db_pool = None
+    with pool_lock:
+        if db_pool is not None:
+            db_pool.close()
+            db_pool = None
 
 
-def ensure_pool_open() -> None:
-    if db_pool is None:
-        raise RuntimeError("Database pool is not initialized.")
-    if db_pool.closed:
-        with pool_lock:
-            if db_pool.closed:
-                db_pool.open(wait=True, timeout=DB_POOL_ACQUIRE_TIMEOUT)
+def get_database_url() -> str:
+    return (
+        os.getenv("SUPABASE_DB_POOLER_URL")
+        or os.getenv("SUPABASE_DB_URL")
+        or os.getenv("DATABASE_URL", "")
+    )
+
+
+def get_or_create_db_pool() -> ConnectionPool:
+    global db_pool
+
+    pool = db_pool
+    if pool is not None and not pool.closed:
+        return pool
+
+    database_url = get_database_url()
+    if not database_url:
+        raise RuntimeError(
+            "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
+        )
+
+    with pool_lock:
+        pool = db_pool
+        if pool is None or pool.closed:
+            pool = ConnectionPool(
+                conninfo=database_url,
+                kwargs=get_db_connect_kwargs(database_url),
+                min_size=DB_POOL_MIN_SIZE,
+                max_size=DB_POOL_MAX_SIZE,
+                check=ConnectionPool.check_connection,
+                open=False,
+            )
+            pool.open(wait=True, timeout=DB_POOL_ACQUIRE_TIMEOUT)
+            db_pool = pool
+        return pool
 
 
 def reset_request_db_conn(close: bool = False) -> None:
     db = g.pop("db", None)
     if db is None:
         return
-    if db_pool is not None:
-        db_pool.putconn(db, close=close)
-    else:
+    pool = db_pool
+    if pool is None or pool.closed:
         db.close()
+        return
+    if close:
+        db.close()
+        return
+    pool.putconn(db)
 
 
 def is_transient_db_error(error: Exception) -> bool:
@@ -200,7 +236,7 @@ def is_api_request() -> bool:
     return request.path.startswith("/api/")
 
 
-def get_db_connect_kwargs() -> dict[str, str | int]:
+def get_db_connect_kwargs(database_url: str) -> dict[str, str | int]:
     kwargs: dict[str, str | int] = {"connect_timeout": DB_CONNECT_TIMEOUT}
     kwargs["options"] = (
         f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS} "
@@ -210,7 +246,7 @@ def get_db_connect_kwargs() -> dict[str, str | int]:
     sslmode_override = os.getenv("DB_SSLMODE", "").strip()
     if sslmode_override:
         kwargs["sslmode"] = sslmode_override
-    elif "sslmode=" not in DATABASE_URL:
+    elif "sslmode=" not in database_url:
         kwargs["sslmode"] = "require"
 
     sslrootcert_override = os.getenv("DB_SSLROOTCERT", "").strip()
@@ -238,16 +274,12 @@ def require_db_admin_api(func):
 
 def get_db() -> psycopg.Connection:
     if "db" not in g:
-        if not DATABASE_URL:
-            raise RuntimeError(
-                "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
-            )
-        ensure_pool_open()
+        pool = get_or_create_db_pool()
         try:
-            conn = db_pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
+            conn = pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
         except PoolClosed:
-            ensure_pool_open()
-            conn = db_pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
+            pool = get_or_create_db_pool()
+            conn = pool.getconn(timeout=DB_POOL_ACQUIRE_TIMEOUT)
         conn.row_factory = dict_row
         conn.prepare_threshold = None
         g.db = conn
@@ -288,6 +320,7 @@ def handle_unexpected_error(error: Exception):
 def init_db() -> None:
     conn = get_db()
     with conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS order_items (
@@ -303,7 +336,17 @@ def init_db() -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_order_items_ordered_at ON order_items(ordered_at DESC)"
         )
-        cur.execute("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS idempotency_key UUID")
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'order_items'
+              AND column_name = 'idempotency_key'
+            """
+        )
+        if cur.fetchone() is None:
+            cur.execute("ALTER TABLE order_items ADD COLUMN idempotency_key UUID")
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_items_idempotency_key ON order_items(idempotency_key)"
             " WHERE idempotency_key IS NOT NULL"
@@ -375,7 +418,7 @@ def orders_logout():
 
 @app.route("/assets/<path:filename>")
 def asset_file(filename: str):
-    return send_from_directory(BASE_DIR / "assets", filename)
+    return send_from_directory(PUBLIC_DIR / "assets", filename)
 
 
 @app.get("/api/orders")
@@ -543,27 +586,7 @@ def delete_order(order_id: int):
     return jsonify({"success": True})
 
 
-if not DATABASE_URL:
-    raise RuntimeError(
-        "Missing database URL. Set SUPABASE_DB_POOLER_URL (recommended) or SUPABASE_DB_URL."
-    )
-
-db_pool = ConnectionPool(
-    conninfo=DATABASE_URL,
-    kwargs=get_db_connect_kwargs(),
-    min_size=DB_POOL_MIN_SIZE,
-    max_size=DB_POOL_MAX_SIZE,
-    check=ConnectionPool.check_connection,
-    open=False,
-)
 atexit.register(close_db_pool)
-
-with app.app_context():
-    try:
-        init_db()
-        schema_initialized = True
-    except psycopg.Error:
-        app.logger.exception("Database initialization failed during startup; will retry on requests.")
 
 
 if __name__ == "__main__":
