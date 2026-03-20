@@ -5,8 +5,12 @@
       "handle": "filesystem"
     },
     {
+      "src": "/api/(.*)",
+      "dest": "/api/[...path].py"
+    },
+    {
       "src": "/(.*)",
-      "dest": "api/index.py"
+      "dest": "/api/index.py"
     }
   ]
 }
